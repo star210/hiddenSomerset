@@ -1,122 +1,117 @@
-# Hidden Finds — Deployment Guide
+# Hidden Finds — setup
 
-A personal atlas of secret places. Browse and pin walks/finds on a map, with every save committed as a git commit on GitHub. Same architecture as the cookbook: token lives in a Netlify Function, never in the browser; one password gates writes; reads are open to anyone with the URL.
+A personal atlas of walks and secret places, hosted on Netlify with data committed live to GitHub.
 
-## Repo structure
+## How it works
+
+- The static site is published from the repo root by Netlify.
+- All data — walks, loose pins, photos — lives in the same repo:
+  - `data/pins.json` : the walks + pins store
+  - `photos/*.jpg`   : uploaded photos
+- The single Netlify Function at `/api/save-pin` writes new commits to the GitHub repo on your behalf using a fine-grained PAT. Every save = one atomic GitHub commit. Netlify then auto-rebuilds and the change is live in ~30s.
+
+## Data model
 
 ```
-hiddenfinds/
-├── index.html                       ← the whole app (single file)
-├── netlify.toml                     ← Netlify build config
-├── data/
-│   └── pins.json                    ← the database (100 pins imported from CSV)
-├── netlify/
-│   └── functions/
-│       └── save-pin.js              ← write proxy → commits to GitHub
-├── scripts/
-│   └── import-csv.py                ← optional: re-import from a fresh Google Maps CSV
-└── SETUP.md                         ← this file
+{
+  "walks": [
+    {
+      "id": "w_xxxx",
+      "name": "Cheddar Gorge North Rim",
+      "description": "Moderate walk through limestone scenery…",
+      "difficulty": "moderate",        // easy | moderate | hard | strenuous
+      "distance_km": 6.2,
+      "duration_min": 150,
+      "terrain": "rocky, stiles",
+      "toilets": "at car park",
+      "mud": "boggy after rain",
+      "parking": { "lat": 51.28, "lon": -2.76, "postcode": "BS27 3QF", "what3words": "trial.lake.boats" },
+      "pois": [ { "id": "poi_xx", "title": "Lower viewpoint", "note": "…", "lat": …, "lon": …, "tags": ["viewpoint"] } ],
+      "photos": [ "photo_…jpg" ],
+      "url": ""
+    }
+  ],
+  "pins": [
+    { "id": "p_xxxx", "title": "…", "lat": …, "lon": …, "tags": […], "photos": […], … }
+  ]
+}
 ```
 
-## Deployment, step by step
+`walks` are the primary unit. `pins` is a flat list of loose pins (the 100 imported from your Google Maps CSV). You can leave them as loose pins or gradually pull them into walks.
 
-### 1. Put it on GitHub
+### Tag set
 
-```bash
-cd hiddenfinds
+`cave · waterfall · swimming · woodland · spring-well · viewpoint · historic · farmshops · holloway`
+
+Each gets a colour on the map:
+- well → blue · historic → brown · woodland → green · waterfall → light blue · cave → dark brown · swimming → teal · viewpoint → gold · farmshops → orange · holloway → sage
+
+## Deploy
+
+### 1. Push the repo to GitHub
+```
 git init
-git add .
-git commit -m "Initial commit"
-gh repo create hiddenfinds --public --source=. --push   # or push to a repo you've created manually
+git add -A
+git commit -m "Initial"
+git remote add origin git@github.com:<you>/hiddenfinds.git
+git push -u origin main
 ```
 
-The repo can be public or private — readers don't talk to GitHub directly, the function does.
-
-### 2. Connect the repo to Netlify
-
-Netlify dashboard → **Add new site → Import an existing project** → pick the repo.
-
-- Build command: *(leave empty)*
-- Publish directory: `.`
-- Functions directory: `netlify/functions` *(auto-detected from `netlify.toml`)*
-
-Let the first deploy run. The site will load and the map will appear, but adding pins won't work yet — the function needs env vars (next step).
-
-### 3. Generate the GitHub token
-
-GitHub → **Settings → Developer settings → Personal access tokens → Fine-grained tokens → Generate new token**.
-
+### 2. Create a fine-grained Personal Access Token
+- github.com → Settings → Developer settings → Personal access tokens → Fine-grained tokens
 - Resource owner: your account
-- Repository access: **Only selected repositories** → pick the `hiddenfinds` repo
-- Repository permissions: **Contents: Read and write**
-- Expiry: as long as you're comfortable with (max 1 year on fine-grained)
+- Repository access: only the `hiddenfinds` repo
+- Permissions → Repository → **Contents: Read and Write**
+- Copy the token (starts with `github_pat_…`). Treat it like a password.
 
-Copy the token immediately — it's shown once.
+### 3. Import to Netlify
+- New site → Import from Git → pick `hiddenfinds`
+- Build command: leave blank
+- Publish directory: `/`
+- Functions directory: `netlify/functions` (auto-detected from `netlify.toml`)
+- Deploy
 
-### 4. Set Netlify env vars
+### 4. Set environment variables (Netlify → site → Settings → Environment variables)
 
-Netlify site → **Site configuration → Environment variables** → add four:
+| Key | Value |
+|---|---|
+| `GITHUB_TOKEN`     | the fine-grained PAT |
+| `GITHUB_REPO`      | `<you>/hiddenfinds` |
+| `GITHUB_BRANCH`    | `main` (optional, defaults to `main`) |
+| `ADMIN_PASSWORD`   | a strong password you'll type into the sign-in box |
 
-| Variable          | Value                                     |
-|-------------------|-------------------------------------------|
-| `GITHUB_TOKEN`    | The fine-grained PAT from step 3          |
-| `GITHUB_REPO`     | `owner/hiddenfinds` (your GitHub username + repo name) |
-| `GITHUB_BRANCH`   | `main` *(optional — defaults to `main`)*  |
-| `ADMIN_PASSWORD`  | Whatever you want to use to gate writes   |
+Redeploy after setting them so the function picks them up.
 
-Then **Deploys → Trigger deploy → Deploy site** so the function picks up the new env vars.
+### 5. Use it
+- Open the site
+- Set your base location ("My location" or "Pick on map")
+- Drag the "Explore within: X km" slider
+- Switch tabs between **Walks** (primary) and **Loose pins** (the 100 imported)
+- Click **+ New walk** → fill in name, description, terrain/toilets/mud, parking (postcode + what3words), add photos, add POIs
+- The first save will prompt for your `ADMIN_PASSWORD`. It's stored in localStorage so you only sign in once per device.
 
-### 5. (Optional) Custom subdomain
+## Photos
 
-Netlify **Domain management → Add custom domain** → e.g. `finds.yourdomain.com`. Add a CNAME at your DNS host pointing to `<site>.netlify.app`. HTTPS auto-provisions.
+- Uploaded photos are resized to 1600px longest edge, JPEG quality 0.82, in the browser before upload.
+- Max 8 per walk or pin per save.
+- Each save commits the JSON change + new photo blobs together in one atomic GitHub commit.
+- Removing a photo just drops the filename from the JSON; the blob stays in the repo (cheap, no garbage-collect needed).
 
-## Using it
+## Build minute budget
 
-- Visit the live URL — the map loads with all 54 located pins from your CSV, and a "To locate" section in the sidebar lists the 46 pins that only had Google place IDs.
-- Tap **+** (bottom right) → tap on the map to drop a new pin → fill the form → Save.
-- Tap an existing pin → **Edit** to change anything, including the coordinates.
-- For unlocated pins: open the sidebar (☰), find the pin under **To locate**, tap → tap on the map to set its coordinates → save.
-- First save of the session prompts for `ADMIN_PASSWORD`; it's cached in `localStorage` until you clear browser data.
+A typical save = 1 GitHub commit = 1 Netlify build, which takes ~5-15 build minutes. Free tier gives you 300 build minutes/month, so you have headroom for ~20-60 saves per month at the upper estimate. If you hit the cap, either upgrade or batch edits into a single save.
 
-## How a save becomes a commit
+## Importing more pins from a Google Maps CSV
 
-1. Browser POSTs `{ pin, password }` (or `{ deleteId, password }`) to `/api/save-pin`.
-2. Function constant-time-compares the password against `ADMIN_PASSWORD`.
-3. Function reads the current `data/pins.json` from the repo.
-4. Function applies the add/update/delete in memory and re-sorts the array.
-5. Function uses the GitHub **Git Data API** to:
-   - Create a blob for the new `data/pins.json` content
-   - Build a tree containing it, parented on the current tree
-   - Create a commit (`"Add pin: Brown's Folly"` / `"Update pin: …"` / `"Remove pin: …"`)
-   - Fast-forward `refs/heads/main` to the new commit
-6. Function returns the updated array; the UI updates instantly.
-7. Netlify rebuilds the static site ~30–60s later so other devices see the change.
-
-## Reimporting a fresh CSV
-
-If you export a newer "Saved places" CSV from Google Maps, drop it into the repo and run:
-
-```bash
-python scripts/import-csv.py path/to/new-export.csv
+```
+python3 scripts/import-csv.py path/to/export.csv data/pins.json
 ```
 
-The script **merges** by stable ID — pins you've manually edited keep their edits, only genuinely new rows are appended. Commit the resulting `data/pins.json` change and push.
-
-## Security notes
-
-- The site is **publicly readable**. Anyone with the URL can browse pins.
-- Writes require `ADMIN_PASSWORD`. The GitHub token never reaches the browser; it lives only in Netlify's env vars.
-- 401 responses clear the cached password so a typo doesn't lock the device.
-- Rotate `GITHUB_TOKEN` when it expires; update the env var; redeploy. No code change required.
+The script merges new rows into the existing `pins` array, keyed by a stable ID, so re-running is idempotent.
 
 ## Troubleshooting
 
-- **"Server not configured: GITHUB_TOKEN missing"** → one of the env vars is unset. Check all four, then redeploy.
-- **"Bad password"** → `ADMIN_PASSWORD` doesn't match what you typed. Browser storage is cleared on a 401, so just try again.
-- **GitHub 401/403 in function logs** → PAT is wrong, expired, or doesn't have Contents: Write on the right repo.
-- **Saved but the map on another device still shows old pins** → wait for Netlify's rebuild (Deploys tab shows it in progress). Your own device sees the change immediately because the function returns the updated array.
-- **Map tiles look slow or rate-limited** → the default Carto tiles allow generous personal use, but if you hit limits you can swap the URL in `index.html` (search for `cartocdn.com`) for another OSM-based provider.
-
-## Growth notes
-
-Each pin is ~250–500 bytes in `pins.json`. A few thousand pins is fine in a single file. If you ever cross ~10,000 pins, the front-end will still cope but you may want to switch to clustered markers (Leaflet.markercluster) — about 20 lines of JS to add.
+- **"Bad password"** → your `ADMIN_PASSWORD` env var doesn't match what you typed. Update it in Netlify and redeploy.
+- **"GitHub … failed: 403"** → PAT lacks `Contents: Read and Write` on the right repo, or PAT expired.
+- **Photos don't show after save** → wait ~30s for Netlify to rebuild from the new commit. Hard refresh.
+- **Function returns 500** → check Netlify function logs for the real error.

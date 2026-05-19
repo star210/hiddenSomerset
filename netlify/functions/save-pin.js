@@ -1,22 +1,37 @@
 // netlify/functions/save-pin.js
 //
-// One endpoint, two operations (decided by request body):
-//   { pin, password }            → add (when pin.id is null/missing) or update
-//   { deleteId, password }       → delete by id
+// One endpoint, several operations (dispatched by body shape):
+//   { password, probe:true }                           validate password only
+//   { password, pin, newPhotos? }                      add / update a loose pin
+//   { password, deletePinId }                          delete a loose pin
+//   { password, walk, newPhotos? }                     add / update a walk
+//   { password, deleteWalkId }                         delete a walk
 //
-// Auth: shared password compared in constant time against env var ADMIN_PASSWORD.
-// Storage: data/pins.json — committed to the configured repo + branch via the
-// GitHub Git Data API so each save is a single clean commit.
+// Data file: data/pins.json
+//   {
+//     "walks": [ { id, name, description, difficulty, distance_km, duration_min,
+//                  terrain, toilets, mud, parking:{lat,lon,postcode,what3words},
+//                  photos:[], pois:[ {id,title,note,lat,lon,tags,photos} ],
+//                  url, created, updated } ],
+//     "pins":  [ { id, title, note, lat, lon, tags, url, photos, created, updated } ]
+//   }
 //
-// Returns: { ok: true, pins: [...], id: <newOrUpdatedId> }
+// Photos: each photo is a JPEG, committed to /photos/<name> in the same
+// atomic commit as the data update.
 //
-// Required env vars:
-//   GITHUB_TOKEN      Fine-grained PAT with Contents: Read+Write on the target repo.
-//   GITHUB_REPO       owner/name, e.g. starkit/hiddenfinds
-//   GITHUB_BRANCH     Branch to write to. Defaults to "main".
-//   ADMIN_PASSWORD    Shared write password.
+// Required env vars: GITHUB_TOKEN, GITHUB_REPO, GITHUB_BRANCH (default "main"),
+// ADMIN_PASSWORD.
 
-const PATH = 'data/pins.json';
+const DATA_PATH = 'data/pins.json';
+const PHOTOS_DIR = 'photos';
+const MAX_NEW_PHOTOS_PER_REQUEST = 8;
+const MAX_PHOTO_BASE64 = 2_300_000;
+const PHOTO_NAME_RE = /^[A-Za-z0-9_-]{1,80}\.jpg$/;
+const VALID_TAGS = new Set([
+  'cave','waterfall','swimming','woodland','spring-well',
+  'viewpoint','historic','farmshops','holloway'
+]);
+const DIFFICULTIES = new Set(['easy','moderate','hard','strenuous']);
 
 export const config = { path: '/api/save-pin' };
 
@@ -41,99 +56,239 @@ export default async (req) => {
     return json({ error: 'Bad password' }, 401);
   }
 
+  if (body.probe === true) return json({ ok: true });
+
   try {
-    // 1. Read current pins.json (or start with [] if 404)
-    const fileRes = await gh(env, `/contents/${PATH}?ref=${encodeURIComponent(env.branch)}`);
-    let pins = [];
+    // Read current store
+    const fileRes = await gh(env, `/contents/${DATA_PATH}?ref=${encodeURIComponent(env.branch)}`);
+    let store = { walks: [], pins: [] };
     if (fileRes.status === 200) {
       const j = await fileRes.json();
-      try { pins = JSON.parse(Buffer.from(j.content, 'base64').toString('utf-8')); }
-      catch { pins = []; }
-      if (!Array.isArray(pins)) pins = [];
+      try {
+        const parsed = JSON.parse(Buffer.from(j.content, 'base64').toString('utf-8'));
+        if (Array.isArray(parsed)) store = { walks: [], pins: parsed };
+        else if (parsed && typeof parsed === 'object') {
+          store.walks = Array.isArray(parsed.walks) ? parsed.walks : [];
+          store.pins  = Array.isArray(parsed.pins)  ? parsed.pins  : [];
+        }
+      } catch { /* keep empty */ }
     } else if (fileRes.status !== 404) {
       return json({ error: 'GitHub read failed: ' + fileRes.status }, 502);
     }
 
-    // 2. Apply the mutation in memory
+    // Validate any newPhotos and build extra file list for commit
+    const acceptedPhotos = new Set();
+    const newFiles = [];
+    if (Array.isArray(body.newPhotos)) {
+      if (body.newPhotos.length > MAX_NEW_PHOTOS_PER_REQUEST) {
+        return json({ error: `Too many photos (max ${MAX_NEW_PHOTOS_PER_REQUEST})` }, 400);
+      }
+      for (const ph of body.newPhotos) {
+        if (!ph || typeof ph.name !== 'string' || typeof ph.data !== 'string') continue;
+        if (!PHOTO_NAME_RE.test(ph.name)) continue;
+        if (ph.data.length > MAX_PHOTO_BASE64) continue;
+        let raw;
+        try { raw = Buffer.from(ph.data, 'base64'); }
+        catch { continue; }
+        if (raw.length < 4) continue;
+        if (raw[0] !== 0xFF || raw[1] !== 0xD8 || raw[2] !== 0xFF) continue;
+        acceptedPhotos.add(ph.name);
+        newFiles.push({ path: `${PHOTOS_DIR}/${ph.name}`, base64: ph.data });
+      }
+    }
+
     let changedId = null;
     let commitMsg = '';
 
-    if (body.deleteId) {
-      const before = pins.length;
-      pins = pins.filter(p => p.id !== body.deleteId);
-      if (pins.length === before) return json({ error: 'Pin not found' }, 404);
-      changedId = body.deleteId;
-      commitMsg = `Remove pin ${body.deleteId}`;
-    } else if (body.pin && typeof body.pin === 'object') {
+    // --- WALK OPERATIONS ---
+    if (body.walk && typeof body.walk === 'object') {
+      const incoming = sanitiseWalk(body.walk);
+      if (!incoming.name) return json({ error: 'Walk name required' }, 400);
+
+      const now = new Date().toISOString();
+      const idx = incoming.id ? store.walks.findIndex(w => w.id === incoming.id) : -1;
+      if (idx >= 0) {
+        const prev = store.walks[idx];
+        const prevPhotos = new Set(prev.photos || []);
+        const keptPhotos = incoming.photos.filter(n => prevPhotos.has(n) || acceptedPhotos.has(n));
+        store.walks[idx] = {
+          ...prev,
+          ...incoming,
+          photos: keptPhotos,
+          created: prev.created || now,
+          updated: now,
+        };
+        changedId = incoming.id;
+        commitMsg = `Update walk: ${truncate(incoming.name, 60)}`;
+      } else {
+        const id = incoming.id || newId(store.walks.map(w => w.id), 'w_');
+        const photos = incoming.photos.filter(n => acceptedPhotos.has(n));
+        store.walks.push({
+          ...incoming,
+          id,
+          photos,
+          created: now,
+          updated: now,
+        });
+        changedId = id;
+        commitMsg = `Add walk: ${truncate(incoming.name, 60)}`;
+      }
+      sortWalks(store.walks);
+    }
+    else if (body.deleteWalkId) {
+      const before = store.walks.length;
+      store.walks = store.walks.filter(w => w.id !== body.deleteWalkId);
+      if (store.walks.length === before) return json({ error: 'Walk not found' }, 404);
+      changedId = body.deleteWalkId;
+      commitMsg = `Remove walk ${body.deleteWalkId}`;
+    }
+    // --- LOOSE PIN OPERATIONS ---
+    else if (body.pin && typeof body.pin === 'object') {
       const incoming = sanitisePin(body.pin);
       if (!incoming.title) return json({ error: 'Title required' }, 400);
 
       const now = new Date().toISOString();
-      const existingIdx = incoming.id ? pins.findIndex(p => p.id === incoming.id) : -1;
-      if (existingIdx >= 0) {
-        const prev = pins[existingIdx];
-        pins[existingIdx] = { ...prev, ...incoming, created: prev.created || now, updated: now };
+      const idx = incoming.id ? store.pins.findIndex(p => p.id === incoming.id) : -1;
+      if (idx >= 0) {
+        const prev = store.pins[idx];
+        const prevPhotos = new Set(prev.photos || []);
+        const kept = incoming.photos.filter(n => prevPhotos.has(n) || acceptedPhotos.has(n));
+        store.pins[idx] = { ...prev, ...incoming, photos: kept, created: prev.created || now, updated: now };
         changedId = incoming.id;
         commitMsg = `Update pin: ${truncate(incoming.title, 60)}`;
       } else {
-        const id = incoming.id || newId(pins);
-        pins.push({ ...incoming, id, created: now, updated: now });
+        const id = incoming.id || newId(store.pins.map(p => p.id), 'p_');
+        const photos = incoming.photos.filter(n => acceptedPhotos.has(n));
+        store.pins.push({ ...incoming, id, photos, created: now, updated: now });
         changedId = id;
         commitMsg = `Add pin: ${truncate(incoming.title, 60)}`;
       }
-    } else {
+      sortPins(store.pins);
+    }
+    else if (body.deletePinId) {
+      const before = store.pins.length;
+      store.pins = store.pins.filter(p => p.id !== body.deletePinId);
+      if (store.pins.length === before) return json({ error: 'Pin not found' }, 404);
+      changedId = body.deletePinId;
+      commitMsg = `Remove pin ${body.deletePinId}`;
+    }
+    else {
       return json({ error: 'Nothing to do' }, 400);
     }
 
-    // 3. Sort: located by title, then unlocated by title (for stable diffs)
-    pins.sort((a, b) => {
-      const aLoc = a.lat != null, bLoc = b.lat != null;
-      if (aLoc !== bLoc) return aLoc ? -1 : 1;
-      return (a.title || '').toLowerCase().localeCompare((b.title || '').toLowerCase());
-    });
+    // Commit atomically
+    const allFiles = [
+      { path: DATA_PATH, content: JSON.stringify(store, null, 2) + '\n' },
+      ...newFiles,
+    ];
+    await gitCommit(env, allFiles, commitMsg);
 
-    // 4. Commit via Git Data API (single atomic commit)
-    const newContent = JSON.stringify(pins, null, 2) + '\n';
-    await gitCommit(env, [{ path: PATH, content: newContent }], commitMsg);
-
-    return json({ ok: true, pins, id: changedId });
+    return json({ ok: true, store, id: changedId });
   } catch (e) {
     console.error(e);
     return json({ error: e.message || 'Server error' }, 500);
   }
 };
 
-/* ── helpers ──────────────────────────────────────────────────── */
+/* ── walk / pin sanitisation ─────────────────────────────────── */
 
-function sanitisePin(p) {
-  const tags = Array.isArray(p.tags)
-    ? p.tags
-        .map(t => String(t).toLowerCase().trim().replace(/[^a-z0-9_-]/g, ''))
-        .filter(Boolean)
-        .slice(0, 12)
-    : [];
-  const lat = isFiniteNum(p.lat) ? clamp(+p.lat, -90, 90) : null;
-  const lon = isFiniteNum(p.lon) ? clamp(+p.lon, -180, 180) : null;
+function sanitiseWalk(w) {
+  const parking = (w.parking && typeof w.parking === 'object') ? w.parking : {};
+  const pLat = isFiniteNum(parking.lat) ? clamp(+parking.lat, -90, 90) : null;
+  const pLon = isFiniteNum(parking.lon) ? clamp(+parking.lon, -180, 180) : null;
+
+  const pois = Array.isArray(w.pois) ? w.pois.map(sanitisePoi).filter(Boolean) : [];
+
+  const difficulty = DIFFICULTIES.has(w.difficulty) ? w.difficulty : '';
+  const distance_km = isFiniteNum(w.distance_km) ? clamp(+w.distance_km, 0, 200) : null;
+  const duration_min = isFiniteNum(w.duration_min) ? clamp(+w.duration_min, 0, 24*60) : null;
+
   return {
-    id: p.id || null,
-    title: String(p.title || '').slice(0, 200).trim(),
-    note: String(p.note || '').slice(0, 4000).trim(),
-    lat, lon,
-    tags,
-    url: String(p.url || '').slice(0, 1000).trim(),
+    id: w.id || null,
+    name: str(w.name, 200),
+    description: str(w.description, 6000),
+    difficulty,
+    distance_km,
+    duration_min,
+    terrain: str(w.terrain, 400),
+    toilets: str(w.toilets, 400),
+    mud: str(w.mud, 400),
+    parking: {
+      lat: pLat, lon: pLon,
+      postcode: str(parking.postcode, 16).toUpperCase(),
+      what3words: str(parking.what3words, 80).toLowerCase(),
+    },
+    pois,
+    photos: photosArr(w.photos, 12),
+    url: str(w.url, 1000),
   };
 }
+
+function sanitisePoi(p) {
+  if (!p || typeof p !== 'object') return null;
+  const title = str(p.title, 200);
+  if (!title) return null;
+  return {
+    id: p.id || ('poi_' + Math.random().toString(36).slice(2, 10)),
+    title,
+    note: str(p.note, 2000),
+    lat: isFiniteNum(p.lat) ? clamp(+p.lat, -90, 90) : null,
+    lon: isFiniteNum(p.lon) ? clamp(+p.lon, -180, 180) : null,
+    tags: tagsArr(p.tags),
+  };
+}
+
+function sanitisePin(p) {
+  return {
+    id: p.id || null,
+    title: str(p.title, 200),
+    note: str(p.note, 4000),
+    lat: isFiniteNum(p.lat) ? clamp(+p.lat, -90, 90) : null,
+    lon: isFiniteNum(p.lon) ? clamp(+p.lon, -180, 180) : null,
+    tags: tagsArr(p.tags),
+    url: str(p.url, 1000),
+    photos: photosArr(p.photos, 8),
+  };
+}
+
+function tagsArr(t) {
+  if (!Array.isArray(t)) return [];
+  const out = [];
+  for (const x of t) {
+    const norm = String(x || '').toLowerCase().trim().replace(/[^a-z0-9_-]/g, '');
+    if (VALID_TAGS.has(norm) && !out.includes(norm)) out.push(norm);
+  }
+  return out;
+}
+
+function photosArr(a, max) {
+  if (!Array.isArray(a)) return [];
+  return a.filter(n => typeof n === 'string' && PHOTO_NAME_RE.test(n)).slice(0, max);
+}
+
+function str(s, max) { return String(s || '').slice(0, max).trim(); }
 function isFiniteNum(x) { return typeof x === 'number' ? Number.isFinite(x) : Number.isFinite(parseFloat(x)); }
 function clamp(x, a, b) { return Math.min(b, Math.max(a, x)); }
 function truncate(s, n) { return s.length > n ? s.slice(0, n - 1) + '…' : s; }
 
-function newId(pins) {
-  const taken = new Set(pins.map(p => p.id));
+function newId(existing, prefix) {
+  const taken = new Set(existing);
   for (let i = 0; i < 50; i++) {
-    const id = 'p_' + Math.random().toString(36).slice(2, 10);
+    const id = prefix + Math.random().toString(36).slice(2, 10);
     if (!taken.has(id)) return id;
   }
-  return 'p_' + Date.now().toString(36);
+  return prefix + Date.now().toString(36);
+}
+
+function sortWalks(walks) {
+  walks.sort((a, b) => (a.name || '').toLowerCase().localeCompare((b.name || '').toLowerCase()));
+}
+function sortPins(pins) {
+  pins.sort((a, b) => {
+    const aLoc = a.lat != null, bLoc = b.lat != null;
+    if (aLoc !== bLoc) return aLoc ? -1 : 1;
+    return (a.title || '').toLowerCase().localeCompare((b.title || '').toLowerCase());
+  });
 }
 
 function ctEq(a, b) {
@@ -163,10 +318,11 @@ async function gh(env, path, init = {}) {
   });
 }
 
-/* Atomically commits the given files (path+content as utf-8 string).
-   One commit, parented on the current branch tip, then fast-forwards the ref. */
+/* Atomically commits the given files. Each file is either:
+     { path, content }   utf-8 text
+     { path, base64  }   already base64-encoded binary
+*/
 async function gitCommit(env, files, message) {
-  // Get current ref + commit + tree
   const refRes = await gh(env, `/git/ref/heads/${encodeURIComponent(env.branch)}`);
   if (!refRes.ok) throw new Error('GitHub ref read failed: ' + refRes.status);
   const ref = await refRes.json();
@@ -177,23 +333,20 @@ async function gitCommit(env, files, message) {
   const parentCommit = await commitRes.json();
   const baseTreeSha = parentCommit.tree.sha;
 
-  // Create blobs for each file
-  const tree = [];
-  for (const f of files) {
+  const tree = await Promise.all(files.map(async (f) => {
+    const content = f.base64
+      ? f.base64
+      : Buffer.from(f.content, 'utf-8').toString('base64');
     const blobRes = await gh(env, '/git/blobs', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        content: Buffer.from(f.content, 'utf-8').toString('base64'),
-        encoding: 'base64',
-      }),
+      body: JSON.stringify({ content, encoding: 'base64' }),
     });
     if (!blobRes.ok) throw new Error('GitHub blob create failed: ' + blobRes.status);
     const blob = await blobRes.json();
-    tree.push({ path: f.path, mode: '100644', type: 'blob', sha: blob.sha });
-  }
+    return { path: f.path, mode: '100644', type: 'blob', sha: blob.sha };
+  }));
 
-  // Build a new tree off the existing one
   const treeRes = await gh(env, '/git/trees', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -202,7 +355,6 @@ async function gitCommit(env, files, message) {
   if (!treeRes.ok) throw new Error('GitHub tree create failed: ' + treeRes.status);
   const newTree = await treeRes.json();
 
-  // Create the commit
   const newCommitRes = await gh(env, '/git/commits', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -211,7 +363,6 @@ async function gitCommit(env, files, message) {
   if (!newCommitRes.ok) throw new Error('GitHub commit create failed: ' + newCommitRes.status);
   const newCommit = await newCommitRes.json();
 
-  // Fast-forward the ref
   const patchRes = await gh(env, `/git/refs/heads/${encodeURIComponent(env.branch)}`, {
     method: 'PATCH',
     headers: { 'Content-Type': 'application/json' },

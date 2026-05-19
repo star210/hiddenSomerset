@@ -1,159 +1,134 @@
 #!/usr/bin/env python3
 """
-import-csv.py — parse a Google Maps "Saved places" CSV export into data/pins.json.
+Import or re-import pins from a Google Maps "Saved Lists" CSV export.
 
 Usage:
-    python scripts/import-csv.py path/to/Wiltshire_Somerset.csv
+    python3 scripts/import-csv.py path/to/Wiltshire_Somerset.csv
 
-Behaviour:
-- Extracts coordinates from the URL (lat,lng in /maps/search/, or @lat,lng), or
-  from the Title field if it looks like coordinates (decimal or DMS).
-- Pins that only have a /maps/place/ URL (Google place ID) are kept with lat=null
-  and shown in the "To locate" panel of the UI.
-- Generates stable IDs (md5 of url+title+row index).
-- Derives basic tags from keywords in the title/note.
-- Merges with existing data/pins.json: pins with matching IDs are preserved
-  (your manual edits are not overwritten). New pins are appended.
+- Re-running is idempotent: pins are matched by stable ID (md5 of url+title+row)
+  so existing pins (including manual edits and uploaded photos) are preserved.
+- Coordinates are extracted from Google Maps URL patterns where present;
+  pins with opaque place URLs land in the file with lat=null and need to be
+  placed manually via the web UI.
+- Tags are derived from keyword matches in title/note. Only the 9 canonical
+  tags below are emitted: cave, waterfall, swimming, woodland, spring-well,
+  viewpoint, historic, farmshops, holloway.
 """
-import csv, re, json, hashlib, sys, os
-from urllib.parse import unquote
+import csv, json, re, sys, hashlib, pathlib
 
-HERE = os.path.dirname(os.path.abspath(__file__))
-OUT  = os.path.normpath(os.path.join(HERE, '..', 'data', 'pins.json'))
-
-TAG_RULES = {
-    'waterfall': ['waterfall', 'falls'],
-    'cave':      ['cave ', ' cave', 'slocker', 'swallet', 'pot'],
-    'spring':    ['spring', 'well ', ' well', 'fountain', 'conduit'],
-    'parking':   ['parking', 'car park', 'carpark'],
-    'swim':      ['swim', 'pond', 'plunge', 'beach'],
-    'viewpoint': ['viewpoint', 'view', 'folly', 'tower', 'hill ', ' hill'],
-    'woodland':  ['wood', 'forest', 'copse'],
-    'food':      ['coffee', 'cafe', 'pub', 'arms', ' inn'],
-    'ancient':   ['barrow', 'standing stone', 'ancient', 'dovecote', 'cathedral', 'church'],
-    'holloway':  ['holloway'],
-    'bridge':    ['bridge', 'viaduct'],
+VALID_TAGS = {
+    'cave', 'waterfall', 'swimming', 'woodland', 'spring-well',
+    'viewpoint', 'historic', 'farmshops', 'holloway',
 }
 
-def short_id(seed):
-    return 'p_' + hashlib.md5(seed.encode()).hexdigest()[:8]
-
-def parse_dms(s):
-    m = re.match(r"(\d+)°(\d+)'([\d.]+)\"\s*([NS])\s+(\d+)°(\d+)'([\d.]+)\"\s*([EW])", s)
-    if not m: return None
-    lat = int(m.group(1)) + int(m.group(2))/60 + float(m.group(3))/3600
-    if m.group(4) == 'S': lat = -lat
-    lon = int(m.group(5)) + int(m.group(6))/60 + float(m.group(7))/3600
-    if m.group(8) == 'W': lon = -lon
-    return lat, lon
+# Keyword -> canonical tag
+KEYWORDS = [
+    (r'\bcave\b|\bcaves\b|\bswallet\b|\brift\b',                'cave'),
+    (r'\bwaterfall\b|\bcascade\b|\bcataract\b',                 'waterfall'),
+    (r'\bswim\b|\bswimming\b|\bbathing\b|\bplunge pool\b|\bwild swim\w*',  'swimming'),
+    (r'\bwood\w*|\bforest\b|\bcopse\b|\bgrove\b',               'woodland'),
+    (r'\bspring\b|\bwell\b|\bholy well\b|\bchalybeate\b',       'spring-well'),
+    (r'\bview\w*|\boverlook\b|\bvista\b|\bhilltop\b|\btrig\b',  'viewpoint'),
+    (r'\bancient\b|\bbarrow\b|\btumulus\b|\bhill ?fort\b|\bcastle\b|\bruin\w*|\bstanding stone\w*|\bmegalith\w*|\bchurch\b|\bchapel\b|\bpriory\b|\babbey\b|\biron age\b|\bbronze age\b|\bneolithic\b|\bmedieval\b',  'historic'),
+    (r'\bfarm shop\w*|\bfarmshop\w*|\bfarm ?stand\b|\bproduce\b|\bbutchers?\b|\bdairy\b|\bcheese\b',  'farmshops'),
+    (r'\bholloway\b|\bsunken lane\b|\bsunken track\b',          'holloway'),
+]
 
 def derive_tags(title, note):
-    text = (title + ' ' + note).lower()
-    return [t for t, kws in TAG_RULES.items() if any(k in text for k in kws)]
+    hay = f'{title} {note}'.lower()
+    tags = []
+    for pat, tag in KEYWORDS:
+        if tag in tags: continue
+        if re.search(pat, hay):
+            tags.append(tag)
+    return tags
 
-def extract_coords(title, url):
-    m = re.search(r'/maps/search/(-?\d+\.\d+),(-?\d+\.\d+)', url)
+def extract_coords(url, title):
+    if not url:
+        return None, None
+    # /maps/search/lat,lon
+    m = re.search(r'/maps/search/(-?\d{1,2}\.\d+),(-?\d{1,3}\.\d+)', url)
     if m: return float(m.group(1)), float(m.group(2))
-    m = re.search(r'@(-?\d+\.\d+),(-?\d+\.\d+)', url)
+    # @lat,lon
+    m = re.search(r'@(-?\d{1,2}\.\d+),(-?\d{1,3}\.\d+)', url)
     if m: return float(m.group(1)), float(m.group(2))
-    m = re.match(r'^(-?\d+\.\d+),\s*(-?\d+\.\d+)$', title)
+    # /maps/dir/.../lat,lon
+    m = re.search(r'/(-?\d{1,2}\.\d+),(-?\d{1,3}\.\d+)(?:[/?]|$)', url)
+    if m:
+        lat, lon = float(m.group(1)), float(m.group(2))
+        # Sanity: must be within plausible UK range
+        if 49 < lat < 61 and -8 < lon < 2:
+            return lat, lon
+    # Decimal in title
+    m = re.search(r'(-?\d{1,2}\.\d{4,}),\s*(-?\d{1,3}\.\d{4,})', title or '')
     if m: return float(m.group(1)), float(m.group(2))
-    dms = parse_dms(title)
-    if dms: return dms
     return None, None
 
-def clean_title(title, note, url):
-    is_coord  = re.match(r'^-?\d+\.\d+,', title) or re.match(r'^\d+°\d+', title)
-    is_generic = title.lower() in ('dropped pin', '')
-    if not (is_coord or is_generic):
-        try: return unquote(title)
-        except Exception: return title
-    place_match = re.search(r'/maps/place/([^/]+)/', url)
-    if note and len(note) < 80:
-        return note
-    if place_match:
-        return unquote(place_match.group(1).replace('+', ' '))
-    if note:
-        return (note[:60] + '…') if len(note) > 60 else note
-    return 'Untitled pin'
-
-def parse_csv(path):
-    pins = []
-    seen = set()
-    with open(path, 'r', encoding='utf-8') as f:
-        reader = csv.DictReader(f)
-        for i, row in enumerate(reader):
-            title = (row.get('Title') or '').strip()
-            note  = (row.get('Note')  or '').strip()
-            url   = (row.get('URL')   or '').strip()
-            tags_raw = (row.get('Tags') or '').strip()
-            if not (title or note or url):
-                continue
-
-            lat, lon = extract_coords(title, url)
-            ttl = clean_title(title, note, url)
-            # If we took the note as title, drop it from the body
-            body_note = '' if ttl == note else note
-
-            tags = derive_tags(ttl, body_note)
-            if 'Waiting for discovery' in tags_raw or '🗺' in tags_raw:
-                if 'todo' not in tags: tags.append('todo')
-
-            pid = short_id(url + ttl + str(i))
-            while pid in seen:
-                pid = short_id(pid + 'x')
-            seen.add(pid)
-
-            pins.append({
-                'id':    pid,
-                'title': ttl,
-                'note':  body_note,
-                'lat':   lat,
-                'lon':   lon,
-                'tags':  tags,
-                'url':   url,
-                'created': '2026-05-19T00:00:00Z',
-                'updated': '2026-05-19T00:00:00Z',
-            })
-    return pins
-
-def merge(existing, fresh):
-    """Keep existing pins by id (preserves manual edits); append new ones."""
-    by_id = {p['id']: p for p in existing}
-    added = 0
-    for p in fresh:
-        if p['id'] not in by_id:
-            by_id[p['id']] = p
-            added += 1
-    merged = list(by_id.values())
-    merged.sort(key=lambda p: (p['lat'] is None, (p['title'] or '').lower()))
-    return merged, added
+def stable_id(url, title, row_idx):
+    key = f'{url}|{title}|{row_idx}'
+    h = hashlib.md5(key.encode()).hexdigest()[:8]
+    return f'p_{h}'
 
 def main():
     if len(sys.argv) != 2:
-        print("Usage: python scripts/import-csv.py <csv-file>")
+        print('Usage: import-csv.py <path-to.csv>', file=sys.stderr)
         sys.exit(1)
+    csv_path = pathlib.Path(sys.argv[1])
+    pins_path = pathlib.Path(__file__).parent.parent / 'data' / 'pins.json'
 
-    csv_path = sys.argv[1]
-    fresh = parse_csv(csv_path)
+    existing = {}
+    if pins_path.exists():
+        for p in json.loads(pins_path.read_text()):
+            existing[p['id']] = p
 
-    existing = []
-    if os.path.exists(OUT):
-        with open(OUT, 'r', encoding='utf-8') as f:
-            try: existing = json.load(f)
-            except Exception: existing = []
+    new_pins = []
+    new_count = 0
+    preserved_count = 0
+    rows = list(csv.DictReader(csv_path.open(newline='', encoding='utf-8-sig')))
+    for i, row in enumerate(rows):
+        title = (row.get('Title') or '').strip()
+        url = (row.get('URL') or '').strip()
+        note_parts = []
+        for k in ('Note', 'Comment'):
+            v = (row.get(k) or '').strip()
+            if v: note_parts.append(v)
+        note = '\n\n'.join(note_parts)
+        if not title and not url:
+            continue
+        pid = stable_id(url, title, i)
+        if pid in existing:
+            new_pins.append(existing[pid])
+            preserved_count += 1
+            continue
+        lat, lon = extract_coords(url, title)
+        tags = derive_tags(title, note)
+        # Drop any non-canonical tags
+        tags = [t for t in tags if t in VALID_TAGS]
+        from datetime import datetime, timezone
+        now = datetime.now(timezone.utc).isoformat(timespec='seconds').replace('+00:00','Z')
+        new_pins.append({
+            'id': pid,
+            'title': title or 'Untitled',
+            'note': note,
+            'lat': lat, 'lon': lon,
+            'tags': tags,
+            'url': url,
+            'photos': [],
+            'created': now,
+            'updated': now,
+        })
+        new_count += 1
 
-    merged, added = merge(existing, fresh)
-    with open(OUT, 'w', encoding='utf-8') as f:
-        json.dump(merged, f, indent=2, ensure_ascii=False)
-        f.write('\n')
+    # Sort: located first then by title
+    new_pins.sort(key=lambda p: (p['lat'] is None, (p.get('title') or '').lower()))
 
-    located   = sum(1 for p in merged if p['lat'] is not None)
-    unlocated = len(merged) - located
-    print(f"Parsed:    {len(fresh)} rows from CSV")
-    print(f"Merged:    {len(merged)} pins total ({added} new, {len(merged) - added} preserved)")
-    print(f"Located:   {located}")
-    print(f"Unlocated: {unlocated} (will show in the 'To locate' panel)")
+    pins_path.parent.mkdir(parents=True, exist_ok=True)
+    pins_path.write_text(json.dumps(new_pins, indent=2) + '\n')
+
+    print(f'{len(new_pins)} pins total ({new_count} new, {preserved_count} preserved)')
+    located = sum(1 for p in new_pins if p['lat'] is not None)
+    print(f'  located: {located}')
+    print(f'  unlocated: {len(new_pins) - located}')
 
 if __name__ == '__main__':
     main()
