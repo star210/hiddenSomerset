@@ -1,0 +1,1139 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#1a201a">
+<title>Hidden Finds — A personal atlas</title>
+
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Fraunces:ital,opsz,wght@0,9..144,400;0,9..144,600;1,9..144,400;1,9..144,500&family=IBM+Plex+Sans:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"
+      integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY=" crossorigin="">
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"
+        integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo=" crossorigin=""></script>
+
+<style>
+:root {
+  --paper:        #efe6d0;
+  --paper-deep:   #e3d6b6;
+  --paper-edge:   #d8c89e;
+  --ink:          #1a201a;
+  --ink-soft:     #3d4538;
+  --ink-faint:    #6c6d5e;
+  --rule:         #b7a87a;
+  --madder:       #8a3324;
+  --madder-deep:  #6d2618;
+  --sage:         #7a8b6c;
+  --gold:         #b0892c;
+  --teal:         #406b66;
+  --display:      'Fraunces', 'EB Garamond', Georgia, serif;
+  --body:         'IBM Plex Sans', system-ui, sans-serif;
+  --mono:         'JetBrains Mono', ui-monospace, monospace;
+  --shadow-1:     0 1px 0 rgba(26,32,26,.06), 0 2px 8px rgba(26,32,26,.08);
+  --shadow-2:     0 4px 24px rgba(26,32,26,.18);
+}
+
+* { box-sizing: border-box; }
+html, body { height: 100%; margin: 0; }
+body {
+  font-family: var(--body);
+  color: var(--ink);
+  background: var(--paper);
+  overflow: hidden;
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+}
+
+/* Subtle paper grain overlay over the whole UI */
+body::before {
+  content: ""; position: fixed; inset: 0; pointer-events: none; z-index: 9999;
+  background-image:
+    radial-gradient(rgba(58,46,20,.05) 1px, transparent 1px),
+    radial-gradient(rgba(58,46,20,.04) 1px, transparent 1px);
+  background-size: 3px 3px, 7px 7px;
+  background-position: 0 0, 1px 2px;
+  mix-blend-mode: multiply;
+  opacity: .55;
+}
+
+/* ── Map canvas ───────────────────────────────────────────── */
+#map {
+  position: fixed; inset: 0;
+  background: var(--paper-deep);
+  filter: saturate(.92) contrast(.97);
+}
+.leaflet-container { background: var(--paper-deep); font-family: var(--body); }
+.leaflet-control-attribution { background: rgba(239,230,208,.85)!important; font-size: 10px; color: var(--ink-soft); }
+.leaflet-control-attribution a { color: var(--madder); }
+.leaflet-control-zoom { display: none; }
+.leaflet-bar { border: 1px solid var(--rule)!important; box-shadow: var(--shadow-1)!important; }
+
+/* ── Topbar ──────────────────────────────────────────────── */
+.topbar {
+  position: fixed; top: 0; left: 0; right: 0; z-index: 600;
+  display: flex; align-items: center; gap: 14px;
+  padding: 14px 18px 12px;
+  background: linear-gradient(to bottom, rgba(239,230,208,.96), rgba(239,230,208,.7) 70%, rgba(239,230,208,0));
+  pointer-events: none;
+}
+.topbar > * { pointer-events: auto; }
+.brand {
+  font-family: var(--display); font-style: italic; font-weight: 500;
+  font-size: 22px; letter-spacing: .2px; color: var(--ink);
+  line-height: 1; padding-top: 2px;
+}
+.brand .ampersand { color: var(--madder); font-weight: 400; }
+.brand .sub {
+  font-style: normal; font-family: var(--body); font-weight: 400;
+  font-size: 11px; letter-spacing: .18em; text-transform: uppercase;
+  color: var(--ink-faint); display: block; margin-top: 2px;
+}
+.brand-compass {
+  width: 34px; height: 34px; flex: none;
+}
+
+.spacer { flex: 1; }
+
+.btn-icon {
+  width: 38px; height: 38px; border-radius: 2px;
+  background: var(--paper); border: 1px solid var(--rule);
+  color: var(--ink); cursor: pointer;
+  display: inline-flex; align-items: center; justify-content: center;
+  box-shadow: var(--shadow-1);
+  transition: background .15s ease, transform .1s ease;
+}
+.btn-icon:hover { background: var(--paper-deep); }
+.btn-icon:active { transform: translateY(1px); }
+.btn-icon svg { width: 18px; height: 18px; stroke: currentColor; fill: none; stroke-width: 1.8; }
+
+/* ── Sidebar drawer ──────────────────────────────────────── */
+.drawer {
+  position: fixed; top: 0; right: 0; bottom: 0; z-index: 700;
+  width: 380px; max-width: 92vw;
+  background: var(--paper);
+  border-left: 1px solid var(--rule);
+  box-shadow: -4px 0 20px rgba(26,32,26,.15);
+  transform: translateX(100%);
+  transition: transform .28s cubic-bezier(.4,.0,.2,1);
+  display: flex; flex-direction: column;
+}
+.drawer.open { transform: translateX(0); }
+.drawer-head {
+  padding: 16px 18px 12px;
+  display: flex; align-items: center; gap: 10px;
+  border-bottom: 1px solid var(--rule);
+}
+.drawer-title {
+  font-family: var(--display); font-weight: 600; font-size: 16px;
+  letter-spacing: .3px; flex: 1;
+}
+.drawer-title small {
+  font-family: var(--mono); font-weight: 400; font-size: 11px;
+  color: var(--ink-faint); margin-left: 6px;
+}
+.drawer-close {
+  background: transparent; border: 0; cursor: pointer; color: var(--ink-soft);
+  width: 30px; height: 30px;
+}
+.drawer-close svg { width: 16px; height: 16px; stroke: currentColor; fill: none; stroke-width: 2; }
+
+.search-row {
+  padding: 12px 14px;
+  border-bottom: 1px solid var(--rule);
+}
+.search-row input {
+  width: 100%;
+  background: var(--paper-deep);
+  border: 1px solid var(--rule);
+  font-family: var(--body); font-size: 14px;
+  padding: 9px 12px;
+  color: var(--ink);
+  outline: none;
+}
+.search-row input:focus { border-color: var(--ink-soft); }
+
+.tag-chips {
+  padding: 10px 14px;
+  border-bottom: 1px solid var(--rule);
+  display: flex; flex-wrap: wrap; gap: 6px;
+}
+.chip {
+  font-family: var(--body); font-size: 11.5px; letter-spacing: .04em;
+  text-transform: lowercase;
+  padding: 4px 9px;
+  background: var(--paper);
+  border: 1px solid var(--rule);
+  color: var(--ink-soft);
+  cursor: pointer; user-select: none;
+  transition: all .12s ease;
+}
+.chip:hover { background: var(--paper-deep); }
+.chip.on {
+  background: var(--ink); color: var(--paper); border-color: var(--ink);
+}
+.chip .count { color: var(--ink-faint); margin-left: 4px; font-size: 10.5px; }
+.chip.on .count { color: var(--paper-edge); }
+
+.pin-list {
+  flex: 1; overflow-y: auto;
+  padding: 6px 0 80px;
+}
+.section-head {
+  padding: 14px 18px 6px;
+  font-family: var(--display); font-style: italic;
+  font-size: 13px; color: var(--ink-faint);
+  display: flex; align-items: baseline; gap: 8px;
+  border-top: 1px solid var(--rule);
+}
+.section-head:first-child { border-top: 0; }
+.section-head .count {
+  font-family: var(--mono); font-style: normal; font-size: 10px;
+  color: var(--ink-faint); letter-spacing: .05em;
+}
+.pin-row {
+  padding: 10px 18px;
+  border-bottom: 1px dotted var(--rule);
+  cursor: pointer;
+  display: flex; gap: 12px; align-items: flex-start;
+  transition: background .12s ease;
+}
+.pin-row:hover { background: var(--paper-deep); }
+.pin-row .marker-mini {
+  flex: none; width: 18px; height: 22px; margin-top: 2px;
+}
+.pin-row .body { flex: 1; min-width: 0; }
+.pin-row .title {
+  font-family: var(--body); font-weight: 500; font-size: 14px;
+  color: var(--ink); line-height: 1.3;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.pin-row .meta {
+  font-family: var(--mono); font-size: 10.5px; color: var(--ink-faint);
+  margin-top: 3px; letter-spacing: .02em;
+}
+.pin-row .note {
+  font-size: 12.5px; color: var(--ink-soft);
+  margin-top: 3px; line-height: 1.35;
+  display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+.pin-row.unlocated .marker-mini { opacity: .35; }
+.pin-row .place-action {
+  display: inline-block;
+  margin-top: 4px;
+  font-family: var(--body); font-size: 11px;
+  color: var(--madder); letter-spacing: .04em;
+  text-transform: uppercase;
+}
+
+/* ── Floating + button ───────────────────────────────────── */
+.fab {
+  position: fixed; bottom: 22px; right: 22px; z-index: 650;
+  width: 56px; height: 56px; border-radius: 50%;
+  background: var(--madder); color: var(--paper);
+  border: 0; cursor: pointer;
+  box-shadow: var(--shadow-2);
+  display: flex; align-items: center; justify-content: center;
+  transition: transform .15s ease, background .15s ease;
+}
+.fab:hover { background: var(--madder-deep); }
+.fab:active { transform: scale(.96); }
+.fab svg { width: 22px; height: 22px; stroke: currentColor; stroke-width: 2; fill: none; }
+.fab.placing { background: var(--ink); animation: pulse 1.3s infinite ease-in-out; }
+@keyframes pulse {
+  0%,100% { box-shadow: 0 0 0 0 rgba(26,32,26,.35), var(--shadow-2); }
+  70%     { box-shadow: 0 0 0 14px rgba(26,32,26,0), var(--shadow-2); }
+}
+
+/* ── Placing-mode hint banner ────────────────────────────── */
+.placing-banner {
+  position: fixed; top: 70px; left: 50%; transform: translateX(-50%);
+  z-index: 650;
+  background: var(--ink); color: var(--paper);
+  font-family: var(--body); font-size: 13px; letter-spacing: .04em;
+  padding: 10px 18px;
+  box-shadow: var(--shadow-2);
+  display: none; align-items: center; gap: 12px;
+}
+.placing-banner.show { display: flex; }
+.placing-banner button {
+  background: transparent; border: 1px solid var(--paper-edge);
+  color: var(--paper); padding: 3px 9px;
+  font-family: var(--body); font-size: 12px; cursor: pointer;
+}
+
+/* ── Modal ───────────────────────────────────────────────── */
+.modal-backdrop {
+  position: fixed; inset: 0; z-index: 1000;
+  background: rgba(26,32,26,.45);
+  display: none;
+  align-items: center; justify-content: center;
+  padding: 16px;
+}
+.modal-backdrop.show { display: flex; }
+.modal {
+  background: var(--paper);
+  border: 1px solid var(--rule);
+  max-width: 460px; width: 100%;
+  max-height: 90vh; overflow-y: auto;
+  box-shadow: var(--shadow-2);
+  display: flex; flex-direction: column;
+}
+.modal-head {
+  padding: 18px 20px 8px;
+  display: flex; align-items: baseline; gap: 10px;
+}
+.modal-head h2 {
+  margin: 0; font-family: var(--display); font-style: italic;
+  font-weight: 500; font-size: 22px; color: var(--ink);
+  letter-spacing: .2px;
+}
+.modal-head .modal-sub {
+  font-family: var(--mono); font-size: 11px; color: var(--ink-faint);
+}
+.modal-body { padding: 6px 20px 16px; }
+.modal-foot {
+  padding: 14px 20px 18px;
+  border-top: 1px solid var(--rule);
+  display: flex; gap: 10px; align-items: center;
+}
+.modal-foot .spacer { flex: 1; }
+
+.field { margin-top: 14px; }
+.field:first-child { margin-top: 0; }
+.field label {
+  display: block; font-size: 11px; letter-spacing: .14em;
+  text-transform: uppercase; color: var(--ink-faint);
+  margin-bottom: 5px;
+}
+.field input[type=text],
+.field textarea {
+  width: 100%;
+  background: var(--paper-deep);
+  border: 1px solid var(--rule);
+  font-family: var(--body); font-size: 14px;
+  color: var(--ink); outline: none;
+  padding: 8px 10px;
+  resize: vertical;
+}
+.field input[type=text]:focus,
+.field textarea:focus { border-color: var(--ink-soft); }
+.field textarea { min-height: 70px; }
+.field .row2 { display: flex; gap: 10px; }
+.field .row2 input { flex: 1; }
+.coords-mono { font-family: var(--mono); font-size: 13px; }
+
+.modal-btn {
+  font-family: var(--body); font-size: 13px;
+  padding: 8px 16px;
+  border: 1px solid var(--ink); color: var(--ink); background: var(--paper);
+  cursor: pointer; letter-spacing: .04em;
+}
+.modal-btn:hover { background: var(--paper-deep); }
+.modal-btn.primary { background: var(--madder); color: var(--paper); border-color: var(--madder); }
+.modal-btn.primary:hover { background: var(--madder-deep); border-color: var(--madder-deep); }
+.modal-btn.danger { border-color: var(--madder); color: var(--madder); background: transparent; }
+.modal-btn.danger:hover { background: rgba(138,51,36,.08); }
+.modal-btn[disabled] { opacity: .5; cursor: wait; }
+
+.field .tag-edit {
+  display: flex; flex-wrap: wrap; gap: 6px; align-items: center;
+  padding: 6px;
+  background: var(--paper-deep);
+  border: 1px solid var(--rule);
+  min-height: 38px;
+}
+.field .tag-edit .chip {
+  background: var(--paper); cursor: default;
+}
+.field .tag-edit .chip .x {
+  margin-left: 5px; color: var(--ink-faint); cursor: pointer;
+}
+.field .tag-edit input {
+  flex: 1; min-width: 80px;
+  border: 0; background: transparent; outline: none;
+  font-family: var(--body); font-size: 13px;
+  padding: 2px 4px;
+}
+
+/* ── Map popup ───────────────────────────────────────────── */
+.leaflet-popup-content-wrapper {
+  background: var(--paper)!important;
+  border: 1px solid var(--rule)!important;
+  border-radius: 0!important;
+  box-shadow: var(--shadow-2)!important;
+}
+.leaflet-popup-content {
+  margin: 14px 16px!important;
+  font-family: var(--body); color: var(--ink); min-width: 200px;
+}
+.leaflet-popup-tip { background: var(--paper)!important; border: 1px solid var(--rule)!important; }
+.popup-title {
+  font-family: var(--display); font-weight: 600; font-size: 16px;
+  margin: 0 0 6px; line-height: 1.2;
+}
+.popup-coords {
+  font-family: var(--mono); font-size: 11px; color: var(--ink-faint);
+  margin-bottom: 8px;
+}
+.popup-note { font-size: 13px; line-height: 1.4; margin-bottom: 10px; }
+.popup-tags { display: flex; flex-wrap: wrap; gap: 4px; margin-bottom: 10px; }
+.popup-tags .chip { font-size: 10.5px; padding: 2px 7px; }
+.popup-actions { display: flex; gap: 8px; }
+.popup-actions a, .popup-actions button {
+  font-family: var(--body); font-size: 11.5px;
+  color: var(--ink-soft); text-decoration: none;
+  background: transparent; border: 0; padding: 0; cursor: pointer;
+  letter-spacing: .04em; text-transform: uppercase;
+}
+.popup-actions a:hover, .popup-actions button:hover { color: var(--madder); }
+
+/* ── Custom pin marker ───────────────────────────────────── */
+.hf-marker {
+  width: 28px; height: 36px;
+  position: relative;
+  filter: drop-shadow(0 2px 3px rgba(26,32,26,.35));
+  cursor: pointer;
+}
+
+/* ── Toast ──────────────────────────────────────────────── */
+.toast {
+  position: fixed; bottom: 88px; left: 50%; transform: translateX(-50%) translateY(20px);
+  z-index: 1100;
+  background: var(--ink); color: var(--paper);
+  font-family: var(--body); font-size: 13px;
+  padding: 9px 16px;
+  opacity: 0; pointer-events: none;
+  transition: opacity .2s ease, transform .2s ease;
+  letter-spacing: .03em;
+}
+.toast.show { opacity: 1; transform: translateX(-50%) translateY(0); pointer-events: auto; }
+.toast.error { background: var(--madder); }
+
+/* ── Layer toggle ───────────────────────────────────────── */
+.layer-toggle {
+  position: fixed; bottom: 22px; left: 22px; z-index: 600;
+  background: var(--paper);
+  border: 1px solid var(--rule);
+  font-family: var(--body); font-size: 11.5px;
+  letter-spacing: .08em; text-transform: uppercase;
+  color: var(--ink-soft);
+  padding: 0;
+  cursor: pointer;
+  box-shadow: var(--shadow-1);
+  display: flex;
+}
+.layer-toggle button {
+  background: transparent; border: 0; cursor: pointer;
+  font: inherit; color: inherit;
+  padding: 8px 14px;
+  border-right: 1px solid var(--rule);
+}
+.layer-toggle button:last-child { border-right: 0; }
+.layer-toggle button.on { background: var(--ink); color: var(--paper); }
+
+/* ── Sign-in modal helper ───────────────────────────────── */
+.signin-note {
+  font-size: 12px; color: var(--ink-faint);
+  margin: 6px 0 0;
+}
+
+/* ── Responsive ──────────────────────────────────────────── */
+@media (max-width: 600px) {
+  .brand { font-size: 19px; }
+  .brand .sub { font-size: 10px; }
+  .fab { bottom: 18px; right: 18px; width: 52px; height: 52px; }
+  .layer-toggle { bottom: 18px; left: 18px; font-size: 11px; }
+  .layer-toggle button { padding: 7px 11px; }
+}
+</style>
+</head>
+<body>
+
+<div id="map"></div>
+
+<!-- Topbar -->
+<div class="topbar">
+  <svg class="brand-compass" viewBox="0 0 40 40" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
+    <circle cx="20" cy="20" r="17" fill="none" stroke="#1a201a" stroke-width="1.2"/>
+    <circle cx="20" cy="20" r="13" fill="none" stroke="#1a201a" stroke-width=".5" stroke-dasharray="1 2"/>
+    <polygon points="20,5 23,20 20,18 17,20" fill="#8a3324"/>
+    <polygon points="20,35 17,20 20,22 23,20" fill="#1a201a"/>
+    <circle cx="20" cy="20" r="1.6" fill="#1a201a"/>
+    <text x="20" y="3.5" text-anchor="middle" font-family="Fraunces, serif" font-style="italic" font-size="4" fill="#1a201a">N</text>
+  </svg>
+  <div class="brand">
+    Hidden Finds <span class="ampersand">·</span> <em>An atlas</em>
+    <span class="sub">Somerset &nbsp;&amp;&nbsp; Wiltshire</span>
+  </div>
+  <div class="spacer"></div>
+  <button class="btn-icon" id="locateBtn" title="Show my location">
+    <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><circle cx="12" cy="12" r="8"/><line x1="12" y1="2" x2="12" y2="5"/><line x1="12" y1="19" x2="12" y2="22"/><line x1="2" y1="12" x2="5" y2="12"/><line x1="19" y1="12" x2="22" y2="12"/></svg>
+  </button>
+  <button class="btn-icon" id="drawerBtn" title="Browse pins">
+    <svg viewBox="0 0 24 24"><line x1="4" y1="7" x2="20" y2="7"/><line x1="4" y1="12" x2="20" y2="12"/><line x1="4" y1="17" x2="20" y2="17"/></svg>
+  </button>
+</div>
+
+<!-- Sidebar drawer -->
+<aside class="drawer" id="drawer" aria-hidden="true">
+  <div class="drawer-head">
+    <div class="drawer-title">Browse <small id="countLabel">0 pins</small></div>
+    <button class="drawer-close" id="drawerClose" aria-label="Close">
+      <svg viewBox="0 0 24 24"><line x1="6" y1="6" x2="18" y2="18"/><line x1="18" y1="6" x2="6" y2="18"/></svg>
+    </button>
+  </div>
+  <div class="search-row">
+    <input type="text" id="searchInput" placeholder="Search title or notes…">
+  </div>
+  <div class="tag-chips" id="tagChips"></div>
+  <div class="pin-list" id="pinList"></div>
+</aside>
+
+<!-- Layer toggle -->
+<div class="layer-toggle" role="group" aria-label="Map style">
+  <button data-layer="voyager" class="on">Map</button>
+  <button data-layer="topo">Topo</button>
+</div>
+
+<!-- FAB -->
+<button class="fab" id="addBtn" title="Add a pin">
+  <svg viewBox="0 0 24 24"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
+</button>
+
+<!-- Placing banner -->
+<div class="placing-banner" id="placingBanner">
+  <span id="placingText">Tap on the map to place this pin</span>
+  <button id="placingCancel">Cancel</button>
+</div>
+
+<!-- Modal -->
+<div class="modal-backdrop" id="modalBackdrop">
+  <div class="modal" id="modal">
+    <div class="modal-head">
+      <h2 id="modalTitle">New find</h2>
+      <span class="modal-sub" id="modalSub"></span>
+    </div>
+    <div class="modal-body">
+      <div class="field">
+        <label for="fTitle">Title</label>
+        <input type="text" id="fTitle" autocomplete="off">
+      </div>
+      <div class="field">
+        <label for="fNote">Notes</label>
+        <textarea id="fNote" placeholder="A line about the place — how to get there, what's there, when to visit…"></textarea>
+      </div>
+      <div class="field">
+        <label>Coordinates</label>
+        <div class="row2">
+          <input type="text" id="fLat" class="coords-mono" placeholder="lat">
+          <input type="text" id="fLon" class="coords-mono" placeholder="lon">
+        </div>
+      </div>
+      <div class="field">
+        <label>Tags</label>
+        <div class="tag-edit" id="tagEdit">
+          <input type="text" id="tagInput" placeholder="add tag, press enter">
+        </div>
+      </div>
+      <div class="field">
+        <label for="fUrl">Reference link (optional)</label>
+        <input type="text" id="fUrl" placeholder="https://…">
+      </div>
+    </div>
+    <div class="modal-foot">
+      <button class="modal-btn danger" id="deleteBtn" style="display:none">Delete</button>
+      <div class="spacer"></div>
+      <button class="modal-btn" id="cancelBtn">Cancel</button>
+      <button class="modal-btn primary" id="saveBtn">Save</button>
+    </div>
+  </div>
+</div>
+
+<!-- Sign-in modal -->
+<div class="modal-backdrop" id="signinBackdrop">
+  <div class="modal" style="max-width:380px">
+    <div class="modal-head">
+      <h2>Sign in</h2>
+    </div>
+    <div class="modal-body">
+      <div class="field">
+        <label for="pwInput">Password</label>
+        <input type="password" id="pwInput" autocomplete="current-password">
+        <p class="signin-note">Only required to add, edit, or delete pins. Browsing is open to anyone.</p>
+      </div>
+    </div>
+    <div class="modal-foot">
+      <div class="spacer"></div>
+      <button class="modal-btn" id="pwCancel">Cancel</button>
+      <button class="modal-btn primary" id="pwOk">Continue</button>
+    </div>
+  </div>
+</div>
+
+<div class="toast" id="toast"></div>
+
+<script>
+'use strict';
+
+/* ──────────────────────────────────────────────────────────
+   Tag → icon glyph and accent colour
+   ────────────────────────────────────────────────────────── */
+const TAG_PRIORITY = [
+  'waterfall','spring','cave','swim','ancient','viewpoint',
+  'bridge','holloway','woodland','food','parking','todo'
+];
+const TAG_META = {
+  waterfall:  {color:'#406b66',  glyph:'≈'},
+  spring:     {color:'#406b66',  glyph:'◯'},
+  cave:       {color:'#3d352a',  glyph:'⌒'},
+  swim:       {color:'#406b66',  glyph:'~'},
+  ancient:    {color:'#6d2618',  glyph:'△'},
+  viewpoint:  {color:'#8a3324',  glyph:'△'},
+  bridge:     {color:'#3d352a',  glyph:'⌒'},
+  holloway:   {color:'#7a8b6c',  glyph:'⩘'},
+  woodland:   {color:'#506b3e',  glyph:'♣'},
+  food:       {color:'#b0892c',  glyph:'•'},
+  parking:    {color:'#6c6d5e',  glyph:'P'},
+  todo:       {color:'#b0892c',  glyph:'?'},
+  default:    {color:'#8a3324',  glyph:'•'}
+};
+function primaryTag(tags) {
+  for (const t of TAG_PRIORITY) if (tags && tags.includes(t)) return t;
+  return 'default';
+}
+function tagMeta(tags) {
+  return TAG_META[primaryTag(tags)] || TAG_META.default;
+}
+
+/* SVG factory for a teardrop pin with a glyph */
+function pinSVG(tags, size = 28) {
+  const m = tagMeta(tags);
+  const h = Math.round(size * 36 / 28);
+  return `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 28 36" width="${size}" height="${h}">
+    <path d="M14 1.2 C 21.3 1.2 26.5 6.4 26.5 13.5 C 26.5 22 14 34.8 14 34.8 C 14 34.8 1.5 22 1.5 13.5 C 1.5 6.4 6.7 1.2 14 1.2 Z"
+      fill="${m.color}" stroke="#1a201a" stroke-width="1"/>
+    <circle cx="14" cy="13.5" r="6.2" fill="#efe6d0" stroke="#1a201a" stroke-width=".6"/>
+    <text x="14" y="16.6" text-anchor="middle" font-family="Fraunces, serif" font-size="9.5" font-weight="600" fill="#1a201a">${m.glyph}</text>
+  </svg>`;
+}
+
+function buildIcon(tags) {
+  return L.divIcon({
+    className: 'hf-marker',
+    html: pinSVG(tags, 28),
+    iconSize: [28, 36],
+    iconAnchor: [14, 35],
+    popupAnchor: [0, -30]
+  });
+}
+
+/* ──────────────────────────────────────────────────────────
+   State
+   ────────────────────────────────────────────────────────── */
+const state = {
+  pins: [],
+  markers: new Map(),   // id → marker
+  filterTags: new Set(),
+  searchQ: '',
+  placing: null,        // null | { mode:'new'|'relocate', id?: string }
+  editing: null,        // null | pin draft
+  authed: !!localStorage.getItem('hf_pwd'),
+};
+
+/* ──────────────────────────────────────────────────────────
+   Map
+   ────────────────────────────────────────────────────────── */
+const map = L.map('map', {
+  zoomControl: false,
+  attributionControl: true
+}).setView([51.247, -2.46], 10);
+L.control.zoom({ position: 'bottomright' }).addTo(map);
+
+const layers = {
+  voyager: L.tileLayer('https://{s}.basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}{r}.png', {
+    maxZoom: 19, subdomains: 'abcd',
+    attribution: '&copy; OpenStreetMap &copy; CARTO'
+  }),
+  topo: L.tileLayer('https://{s}.tile.opentopomap.org/{z}/{x}/{y}.png', {
+    maxZoom: 17, subdomains: 'abc',
+    attribution: 'Map data: &copy; OpenStreetMap, SRTM | Style: &copy; OpenTopoMap'
+  })
+};
+let currentLayer = 'voyager';
+layers.voyager.addTo(map);
+
+document.querySelectorAll('.layer-toggle button').forEach(b => {
+  b.onclick = () => {
+    const wanted = b.dataset.layer;
+    if (wanted === currentLayer) return;
+    map.removeLayer(layers[currentLayer]);
+    layers[wanted].addTo(map);
+    currentLayer = wanted;
+    document.querySelectorAll('.layer-toggle button').forEach(x => x.classList.toggle('on', x.dataset.layer === wanted));
+  };
+});
+
+/* ──────────────────────────────────────────────────────────
+   Load pins
+   ────────────────────────────────────────────────────────── */
+async function loadPins() {
+  try {
+    const res = await fetch('/data/pins.json?ts=' + Date.now());
+    if (!res.ok) throw new Error('HTTP ' + res.status);
+    state.pins = await res.json();
+  } catch (e) {
+    console.error('Failed to load pins.json', e);
+    state.pins = [];
+    toast('Could not load pins', true);
+  }
+  renderAll();
+  if (state.pins.some(p => p.lat != null)) {
+    const bounds = L.latLngBounds(
+      state.pins.filter(p => p.lat != null).map(p => [p.lat, p.lon])
+    );
+    map.fitBounds(bounds, { padding: [40, 40], maxZoom: 11 });
+  }
+}
+
+/* ──────────────────────────────────────────────────────────
+   Render
+   ────────────────────────────────────────────────────────── */
+function renderAll() {
+  renderMarkers();
+  renderTagChips();
+  renderList();
+}
+
+function renderMarkers() {
+  // Remove markers no longer in state
+  for (const [id, marker] of state.markers) {
+    if (!state.pins.find(p => p.id === id)) {
+      map.removeLayer(marker);
+      state.markers.delete(id);
+    }
+  }
+  for (const p of state.pins) {
+    if (p.lat == null) {
+      // unlocated — make sure no marker
+      if (state.markers.has(p.id)) {
+        map.removeLayer(state.markers.get(p.id));
+        state.markers.delete(p.id);
+      }
+      continue;
+    }
+    let m = state.markers.get(p.id);
+    if (!m) {
+      m = L.marker([p.lat, p.lon], { icon: buildIcon(p.tags) });
+      m.addTo(map);
+      m.on('click', () => openPinPopup(p.id));
+      state.markers.set(p.id, m);
+    } else {
+      m.setLatLng([p.lat, p.lon]);
+      m.setIcon(buildIcon(p.tags));
+    }
+    // Filter visibility
+    const visible = pinPassesFilter(p);
+    if (visible && !map.hasLayer(m)) m.addTo(map);
+    else if (!visible && map.hasLayer(m)) map.removeLayer(m);
+  }
+}
+
+function pinPassesFilter(p) {
+  if (state.filterTags.size > 0) {
+    let hit = false;
+    for (const t of state.filterTags) if (p.tags && p.tags.includes(t)) { hit = true; break; }
+    if (!hit) return false;
+  }
+  if (state.searchQ) {
+    const hay = ((p.title || '') + ' ' + (p.note || '')).toLowerCase();
+    if (!hay.includes(state.searchQ)) return false;
+  }
+  return true;
+}
+
+function renderTagChips() {
+  const counts = {};
+  for (const p of state.pins) for (const t of (p.tags || [])) counts[t] = (counts[t] || 0) + 1;
+  const order = TAG_PRIORITY.filter(t => counts[t]).concat(
+    Object.keys(counts).filter(t => !TAG_PRIORITY.includes(t)).sort()
+  );
+  const c = document.getElementById('tagChips');
+  c.innerHTML = '';
+  for (const t of order) {
+    const el = document.createElement('span');
+    el.className = 'chip' + (state.filterTags.has(t) ? ' on' : '');
+    el.innerHTML = `${t}<span class="count">${counts[t]}</span>`;
+    el.onclick = () => {
+      if (state.filterTags.has(t)) state.filterTags.delete(t);
+      else state.filterTags.add(t);
+      renderAll();
+    };
+    c.appendChild(el);
+  }
+}
+
+function renderList() {
+  const list = document.getElementById('pinList');
+  list.innerHTML = '';
+  const filtered = state.pins.filter(pinPassesFilter);
+  const located = filtered.filter(p => p.lat != null).sort((a, b) => a.title.localeCompare(b.title));
+  const unlocated = filtered.filter(p => p.lat == null).sort((a, b) => a.title.localeCompare(b.title));
+
+  document.getElementById('countLabel').textContent =
+    `${filtered.length} pin${filtered.length === 1 ? '' : 's'}`;
+
+  if (located.length) {
+    const h = document.createElement('div');
+    h.className = 'section-head';
+    h.innerHTML = `On the map <span class="count">${located.length}</span>`;
+    list.appendChild(h);
+    for (const p of located) list.appendChild(rowEl(p, false));
+  }
+  if (unlocated.length) {
+    const h = document.createElement('div');
+    h.className = 'section-head';
+    h.innerHTML = `To locate <span class="count">${unlocated.length}</span>`;
+    list.appendChild(h);
+    for (const p of unlocated) list.appendChild(rowEl(p, true));
+  }
+}
+
+function rowEl(p, unlocated) {
+  const row = document.createElement('div');
+  row.className = 'pin-row' + (unlocated ? ' unlocated' : '');
+  row.dataset.id = p.id;
+  const meta = unlocated
+    ? `<div class="meta">Source: ${escapeHTML(extractDomain(p.url) || '—')}</div>`
+    : `<div class="meta">${p.lat.toFixed(5)}, ${p.lon.toFixed(5)}</div>`;
+  const action = unlocated
+    ? `<div class="place-action">→ place on map</div>`
+    : '';
+  row.innerHTML = `
+    <div class="marker-mini">${pinSVG(p.tags, 18)}</div>
+    <div class="body">
+      <div class="title">${escapeHTML(p.title || 'Untitled')}</div>
+      ${meta}
+      ${p.note ? `<div class="note">${escapeHTML(p.note)}</div>` : ''}
+      ${action}
+    </div>`;
+  row.onclick = () => {
+    if (unlocated) startRelocate(p.id);
+    else {
+      drawer(false);
+      map.flyTo([p.lat, p.lon], Math.max(map.getZoom(), 14), { duration: 0.6 });
+      setTimeout(() => openPinPopup(p.id), 600);
+    }
+  };
+  return row;
+}
+
+function escapeHTML(s) {
+  return (s == null ? '' : String(s)).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]);
+}
+function extractDomain(url) {
+  if (!url) return '';
+  try { return new URL(url).hostname.replace(/^www\./, ''); } catch { return ''; }
+}
+
+/* ──────────────────────────────────────────────────────────
+   Pin popups (view)
+   ────────────────────────────────────────────────────────── */
+function openPinPopup(id) {
+  const p = state.pins.find(x => x.id === id);
+  if (!p || p.lat == null) return;
+  const m = state.markers.get(id);
+  if (!m) return;
+  const tagsHTML = (p.tags || []).map(t => `<span class="chip">${t}</span>`).join('');
+  const html = `
+    <div>
+      <h3 class="popup-title">${escapeHTML(p.title || 'Untitled')}</h3>
+      <div class="popup-coords">${p.lat.toFixed(5)}, ${p.lon.toFixed(5)}</div>
+      ${p.note ? `<div class="popup-note">${escapeHTML(p.note)}</div>` : ''}
+      ${tagsHTML ? `<div class="popup-tags">${tagsHTML}</div>` : ''}
+      <div class="popup-actions">
+        <a href="https://www.google.com/maps/dir/?api=1&destination=${p.lat},${p.lon}" target="_blank" rel="noopener">Directions</a>
+        ${p.url ? `<a href="${escapeHTML(p.url)}" target="_blank" rel="noopener">Source</a>` : ''}
+        <button data-edit="${p.id}">Edit</button>
+      </div>
+    </div>`;
+  m.bindPopup(html, { closeButton: false, autoPan: true }).openPopup();
+  setTimeout(() => {
+    const btn = document.querySelector(`button[data-edit="${p.id}"]`);
+    if (btn) btn.onclick = () => { map.closePopup(); openEditor(p); };
+  }, 30);
+}
+
+/* ──────────────────────────────────────────────────────────
+   Drawer
+   ────────────────────────────────────────────────────────── */
+const drawerEl = document.getElementById('drawer');
+function drawer(open) {
+  drawerEl.classList.toggle('open', open);
+  drawerEl.setAttribute('aria-hidden', open ? 'false' : 'true');
+}
+document.getElementById('drawerBtn').onclick = () => drawer(!drawerEl.classList.contains('open'));
+document.getElementById('drawerClose').onclick = () => drawer(false);
+
+document.getElementById('searchInput').addEventListener('input', e => {
+  state.searchQ = e.target.value.toLowerCase().trim();
+  renderAll();
+});
+
+/* ──────────────────────────────────────────────────────────
+   Locate me
+   ────────────────────────────────────────────────────────── */
+document.getElementById('locateBtn').onclick = () => {
+  if (!navigator.geolocation) return toast('Geolocation not available', true);
+  toast('Locating…');
+  navigator.geolocation.getCurrentPosition(pos => {
+    map.flyTo([pos.coords.latitude, pos.coords.longitude], 13, { duration: 0.7 });
+  }, err => toast('Could not get location: ' + err.message, true), { timeout: 10000 });
+};
+
+/* ──────────────────────────────────────────────────────────
+   Placing mode
+   ────────────────────────────────────────────────────────── */
+const fabBtn = document.getElementById('addBtn');
+const banner = document.getElementById('placingBanner');
+const placingText = document.getElementById('placingText');
+
+fabBtn.onclick = () => {
+  if (state.placing) cancelPlacing();
+  else startPlacing();
+};
+document.getElementById('placingCancel').onclick = cancelPlacing;
+
+function startPlacing() {
+  state.placing = { mode: 'new' };
+  placingText.textContent = 'Tap on the map to drop a new pin';
+  banner.classList.add('show');
+  fabBtn.classList.add('placing');
+  map.getContainer().style.cursor = 'crosshair';
+  drawer(false);
+}
+function startRelocate(id) {
+  state.placing = { mode: 'relocate', id };
+  const p = state.pins.find(x => x.id === id);
+  placingText.textContent = `Tap on the map to place “${p && p.title ? truncate(p.title, 40) : 'this pin'}”`;
+  banner.classList.add('show');
+  fabBtn.classList.add('placing');
+  map.getContainer().style.cursor = 'crosshair';
+  drawer(false);
+}
+function cancelPlacing() {
+  state.placing = null;
+  banner.classList.remove('show');
+  fabBtn.classList.remove('placing');
+  map.getContainer().style.cursor = '';
+}
+function truncate(s, n) { return s.length > n ? s.slice(0, n - 1) + '…' : s; }
+
+map.on('click', e => {
+  if (!state.placing) return;
+  const { lat, lng } = e.latlng;
+  if (state.placing.mode === 'new') {
+    cancelPlacing();
+    openEditor({ id: null, title: '', note: '', lat, lon: lng, tags: [], url: '' });
+  } else if (state.placing.mode === 'relocate') {
+    const p = state.pins.find(x => x.id === state.placing.id);
+    cancelPlacing();
+    if (p) openEditor({ ...p, lat, lon: lng });
+  }
+});
+
+/* ──────────────────────────────────────────────────────────
+   Editor modal
+   ────────────────────────────────────────────────────────── */
+const modal = document.getElementById('modalBackdrop');
+const elTitle = document.getElementById('modalTitle');
+const elSub = document.getElementById('modalSub');
+const fTitle = document.getElementById('fTitle');
+const fNote = document.getElementById('fNote');
+const fLat = document.getElementById('fLat');
+const fLon = document.getElementById('fLon');
+const fUrl = document.getElementById('fUrl');
+const tagEdit = document.getElementById('tagEdit');
+const tagInput = document.getElementById('tagInput');
+const deleteBtn = document.getElementById('deleteBtn');
+
+function openEditor(p) {
+  state.editing = JSON.parse(JSON.stringify(p));
+  elTitle.textContent = p.id ? 'Edit find' : 'New find';
+  elSub.textContent = p.id ? p.id : '';
+  fTitle.value = p.title || '';
+  fNote.value = p.note || '';
+  fLat.value = p.lat != null ? p.lat.toFixed(6) : '';
+  fLon.value = p.lon != null ? p.lon.toFixed(6) : '';
+  fUrl.value = p.url || '';
+  renderTagEdit(p.tags || []);
+  deleteBtn.style.display = p.id ? 'inline-block' : 'none';
+  modal.classList.add('show');
+  setTimeout(() => fTitle.focus(), 50);
+}
+function closeEditor() {
+  state.editing = null;
+  modal.classList.remove('show');
+}
+document.getElementById('cancelBtn').onclick = closeEditor;
+modal.addEventListener('click', e => { if (e.target === modal) closeEditor(); });
+
+function renderTagEdit(tags) {
+  // Remove existing chips (everything except the input)
+  Array.from(tagEdit.querySelectorAll('.chip')).forEach(c => c.remove());
+  tags.forEach(t => {
+    const c = document.createElement('span');
+    c.className = 'chip';
+    c.innerHTML = `${t}<span class="x" data-tag="${t}">×</span>`;
+    tagEdit.insertBefore(c, tagInput);
+  });
+  tagEdit.querySelectorAll('.x').forEach(x => {
+    x.onclick = () => {
+      state.editing.tags = (state.editing.tags || []).filter(t => t !== x.dataset.tag);
+      renderTagEdit(state.editing.tags);
+    };
+  });
+}
+tagInput.addEventListener('keydown', e => {
+  if (e.key === 'Enter' || e.key === ',') {
+    e.preventDefault();
+    const v = tagInput.value.trim().toLowerCase().replace(/[^a-z0-9_-]/g, '');
+    if (v && !(state.editing.tags || []).includes(v)) {
+      state.editing.tags = (state.editing.tags || []).concat(v);
+      renderTagEdit(state.editing.tags);
+    }
+    tagInput.value = '';
+  }
+});
+
+document.getElementById('saveBtn').onclick = async () => {
+  const draft = state.editing;
+  draft.title = fTitle.value.trim();
+  draft.note = fNote.value.trim();
+  draft.url = fUrl.value.trim();
+  const lat = parseFloat(fLat.value);
+  const lon = parseFloat(fLon.value);
+  draft.lat = isFinite(lat) ? lat : null;
+  draft.lon = isFinite(lon) ? lon : null;
+
+  if (!draft.title) return toast('Title required', true);
+
+  await ensureAuth();
+  if (!state.authed) return;
+
+  const btn = document.getElementById('saveBtn');
+  btn.disabled = true; btn.textContent = 'Saving…';
+  try {
+    const res = await api({ pin: draft, password: localStorage.getItem('hf_pwd') });
+    if (res && res.ok) {
+      state.pins = res.pins;
+      renderAll();
+      closeEditor();
+      toast('Saved');
+      if (draft.lat != null) {
+        setTimeout(() => openPinPopup(res.id || draft.id), 100);
+      }
+    }
+  } finally {
+    btn.disabled = false; btn.textContent = 'Save';
+  }
+};
+
+deleteBtn.onclick = async () => {
+  if (!state.editing || !state.editing.id) return;
+  if (!confirm(`Delete "${state.editing.title}"?`)) return;
+  await ensureAuth();
+  if (!state.authed) return;
+  deleteBtn.disabled = true;
+  try {
+    const res = await api({ deleteId: state.editing.id, password: localStorage.getItem('hf_pwd') });
+    if (res && res.ok) {
+      state.pins = res.pins;
+      renderAll();
+      closeEditor();
+      toast('Deleted');
+    }
+  } finally { deleteBtn.disabled = false; }
+};
+
+/* ──────────────────────────────────────────────────────────
+   Auth (password prompt)
+   ────────────────────────────────────────────────────────── */
+const signinModal = document.getElementById('signinBackdrop');
+const pwInput = document.getElementById('pwInput');
+let pwResolve = null;
+function ensureAuth() {
+  if (localStorage.getItem('hf_pwd')) { state.authed = true; return Promise.resolve(true); }
+  signinModal.classList.add('show');
+  pwInput.value = '';
+  setTimeout(() => pwInput.focus(), 50);
+  return new Promise(r => { pwResolve = r; });
+}
+function closeSignin(ok) {
+  signinModal.classList.remove('show');
+  if (pwResolve) { pwResolve(ok); pwResolve = null; }
+}
+document.getElementById('pwCancel').onclick = () => { state.authed = false; closeSignin(false); };
+document.getElementById('pwOk').onclick = () => {
+  const v = pwInput.value.trim();
+  if (!v) return;
+  localStorage.setItem('hf_pwd', v);
+  state.authed = true;
+  closeSignin(true);
+};
+pwInput.addEventListener('keydown', e => { if (e.key === 'Enter') document.getElementById('pwOk').click(); });
+
+/* ──────────────────────────────────────────────────────────
+   API
+   ────────────────────────────────────────────────────────── */
+async function api(body) {
+  try {
+    const res = await fetch('/api/save-pin', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body)
+    });
+    const ct = res.headers.get('content-type') || '';
+    const data = ct.includes('application/json') ? await res.json() : null;
+    if (res.status === 401) {
+      localStorage.removeItem('hf_pwd');
+      state.authed = false;
+      toast('Wrong password', true);
+      return null;
+    }
+    if (!res.ok) {
+      toast((data && data.error) || ('Server error ' + res.status), true);
+      return null;
+    }
+    return data;
+  } catch (e) {
+    toast('Network error', true);
+    console.error(e);
+    return null;
+  }
+}
+
+/* ──────────────────────────────────────────────────────────
+   Toast
+   ────────────────────────────────────────────────────────── */
+let toastT;
+function toast(msg, isError) {
+  const el = document.getElementById('toast');
+  el.textContent = msg;
+  el.classList.toggle('error', !!isError);
+  el.classList.add('show');
+  clearTimeout(toastT);
+  toastT = setTimeout(() => el.classList.remove('show'), 2200);
+}
+
+/* ──────────────────────────────────────────────────────────
+   Init
+   ────────────────────────────────────────────────────────── */
+loadPins();
+
+</script>
+</body>
+</html>
